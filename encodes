@@ -1,0 +1,121 @@
+#!/bin/bash
+# скрипт перекодирования видеофайлов кодеками hevc(x265) и Vorbis
+
+# путь к папке с корзиной, если данные находяться на основном разделе то путь будет:
+# /home/%user%/.local/share/Trash
+# но у меня для медиафайлов имеется отдельный раздел
+recycle="/media/media/.Trash-1000"
+ext="--no-wrap --info --timeout=5"
+err="--title=\"Ошибка\""
+# для работы скрипта я использую ffmpeg, собранный в такой конфигурации:
+if	[ "$(which ffprobe)_" = "_" ] ||
+	[ "$(ffprobe -v quiet -version|grep "libx265"|grep "libvorbis")_" = "_" ];then
+	zenity --no-wrap --question --title="Неподходящая конфигурация ffmpeg!" \
+	--text="В пакете ffmpeg отсутствуют необходимые компоненты.\nСобрать ffmpeg из исходников"
+	if [ $? = 0 ]; then
+		zenity --text="Процедура скачивания и сборки довольно длительная, придется подождать." \
+		--title="Сборка ffmpeg" ${ext} &
+		git clone git://source.ffmpeg.org/ffmpeg.git; cd ffmpeg
+		./configure --enable-version3 --enable-libtheora --enable-libvorbis --enable-libxvid \
+		--enable-ffplay  --enable-libopencore-amrwb --enable-libvo-amrwbenc --enable-gpl --enable-libx264 \
+		--enable-libx265 --enable-libmp3lame --enable-nonfree --enable-libfdk-aac
+		make
+		gksu make install
+		cd ..; rm -rf ffmpeg
+	else
+		zenity --text="Продолжение невозможно!" ${err} ${ext} &
+		exit 0
+	fi
+fi
+
+# запрашиваю путь к папке с медифайлами
+work_path=$(zenity --title="Выбор папки" --file-selection --directory --filename="`pwd`")
+if [ "${work_path}_" = "_" ]; then
+	zenity --text="Не выбрана целевая папка!" ${err} ${ext} &
+	exit 0
+fi
+
+# поиск всех видеофайлов в папке с глубиной вложенности до 4 подпапок
+find ${work_path} -maxdepth 5 -regextype posix-egrep -regex '.*(AVI|avi|MKV|mkv|MP4|mp4|3GP|3gp)$' > vlist
+
+# цикл отсева файлов уже конвертированых кодеком hevc
+if [ -f list ]; then rm list; fi
+while read i; do
+# получаю все кодеки, используемые в демуксере
+	ffprobe -v quiet -show_streams -i "${i}"|sed -n 's/.*codec_name=\([a-z,A-Z,0-9,\.]*\).*/\1/p' > codecs
+	while read codec; do
+		if [ "${codec}_" = "hevc_" ]; then
+			break
+		fi
+	done < codecs
+	rm codecs
+# и фильтрую hevc
+	if [ "${codec}_" = "hevc_" ]; then
+		echo "Skipping: ${i}"
+		continue
+	fi
+	if [ "${i}_" = "_" ];then
+		break
+	fi
+# если в файле нет упоминания о hevc добавляю файл в рабочий листинг
+	echo "${i}" >> list
+done < vlist
+rm vlist
+
+# цикл конвертирования
+exec 10<list
+while read i <&10; do
+# определение количесва потоков в демуксере
+	a=$(ffprobe -i "${i}" -show_streams 2>&1|grep 'Stream #'|sed -n 's/^.*\(0:[0-9]\+\).*/\1/p')
+	count=$(echo ${a}|wc -w)
+	c=0
+	line=
+# создание карты потоков, дабы ничего не потерять
+	while [ ${c} -lt ${count} ]
+	do
+		line="${line} -map 0:${c}"
+		(( c++ ))
+	done
+# уменшение размера, если требуется
+	width=$(ffprobe -v quiet -show_streams -i "${i}"|sed -n 's/^width=\([0-9]\{3,4\}\).*/\1/p')
+	if [ ${width} -gt 1280 ];then
+		line="${line} -vf scale=1280:-1"
+	fi
+# получаю путь из полного имени
+	lpth=${i%/*}
+# создаю новое имя файла, заменив пробелы и точки на символы подчеркивания
+	name=$(echo ${i##*/}|sed 's/ - /-/g;s/^.\///;s/ /_/g;s/\./_/g')
+	name="${lpth}/${name:0:-4}.mkv"
+	name=$(echo ${name}|sed 's/-[A-Z,a-z,0-9,-]\{11\}\./\./')
+# переименовываю исходный файл, добавив в конец имени плюсик, что-бы избежать совпадения имён
+	o="${i:0:-4}+.${i: -3:3}"
+	mv "${i}" "${o}"
+# создаю и запускаю маленький скрипт с заданными параметрами конвертации
+	cat > "run" << EOF
+#!/bin/bash
+nice -n 19 ffmpeg -i "${o}"${line} -c:a libvorbis -c:v libx265 -f matroska "${name}"
+EOF
+	chmod a+x run
+	./run
+	rm run
+# сравниваю продолжительность файлов
+	dur1=$(ffprobe -v quiet -i "${o}" -show_format|grep duration|cut -f2 -d'='|cut -f1 -d'.')
+	dur2=$(ffprobe -v quiet -i "${name}" -show_format|grep duration|cut -f2 -d'='|cut -f1 -d'.')
+	if [ "${dur2}_" = "_" ]; then
+		echo "Skipping: ${i##*/}"
+		continue
+	fi
+	delta=$(( ${dur1} - ${dur2} ))
+# если продолжительность отличается менее, чем на 5 секунд, перемещаю исходник в корзину
+	if [ $delta -lt 5 ]; then
+		if [ "$(which gio)_" = "_" ];then
+			mv "${o}" "${recycle}/files/${i##*/}"
+			a="$(echo ${i}|sed 's/ /%20/g')"
+			echo -e "[Trash Info]\nPath=${a}\nDeletionDate=$(date +%FT%T)" >\
+					"${recycle}/info/${i##*/}.trashinfo"
+		else
+			gio trash "${o}"
+		fi
+	fi
+done
+rm list
