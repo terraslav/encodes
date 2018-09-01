@@ -93,7 +93,7 @@ while read i <&10; do
 # создаю и запускаю маленький скрипт с заданными параметрами конвертации
 	cat > "run" << EOF
 #!/bin/bash
-nice -n 19 ffmpeg -i "${o}"${line} -c:a libvorbis -c:v libx265 -f matroska "${name}"
+nice -n 19 ffmpeg -i "${o}"${line} -c:a opus -strict -2 -c:v libx265 -crf 20 -f matroska "${name}"
 EOF
 	chmod a+x run
 	./run
