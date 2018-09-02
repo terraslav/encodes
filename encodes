@@ -35,11 +35,16 @@ if [ "${work_path}_" = "_" ]; then
 	exit 0
 fi
 
+# Выбор битрейта сжатия
+brate=$(zenity --scale --title="Выбор битрейта сжатия" --text="0 - Наихудшее качество/минимальный битрейт\r11 - Минимальные потери качества/максимальный битрейт" --min-value=0 --max-value=11 --step=1 --value=0)
+brate=$(( 28 - brate ))
+echo $brate
+
 # поиск всех видеофайлов в папке с глубиной вложенности до 4 подпапок
 find ${work_path} -maxdepth 5 -regextype posix-egrep -regex '.*(AVI|avi|MKV|mkv|MP4|mp4|3GP|3gp)$' > vlist
 
 # цикл отсева файлов уже конвертированых кодеком hevc
-if [ -f list ]; then rm list; fi
+if [ -f /tmp/list ]; then rm /tmp/list; fi
 while read i; do
 # получаю все кодеки, используемые в демуксере
 	ffprobe -v quiet -show_streams -i "${i}"|sed -n 's/.*codec_name=\([a-z,A-Z,0-9,\.]*\).*/\1/p' > codecs
@@ -58,12 +63,12 @@ while read i; do
 		break
 	fi
 # если в файле нет упоминания о hevc добавляю файл в рабочий листинг
-	echo "${i}" >> list
+	echo "${i}" >> /tmp/list
 done < vlist
 rm vlist
 
 # цикл конвертирования
-exec 10<list
+exec 10</tmp/list
 while read i <&10; do
 # определение количесва потоков в демуксере
 	a=$(ffprobe -i "${i}" -show_streams 2>&1|grep 'Stream #'|sed -n 's/^.*\(0:[0-9]\+\).*/\1/p')
@@ -91,13 +96,13 @@ while read i <&10; do
 	o="${i:0:-4}+.${i: -3:3}"
 	mv "${i}" "${o}"
 # создаю и запускаю маленький скрипт с заданными параметрами конвертации
-	cat > "run" << EOF
+	cat > "/tmp/run" << EOF
 #!/bin/bash
-nice -n 19 ffmpeg -i "${o}"${line} -c:a opus -strict -2 -c:v libx265 -crf 20 -f matroska "${name}"
+nice -n 19 ffmpeg -hide_banner -i "${o}"${line} -c:a opus -strict -2 -c:v libx265 -crf ${brate} -f matroska "${name}"
 EOF
-	chmod a+x run
-	./run
-	rm run
+	chmod a+x /tmp/run
+	/tmp/run
+	rm /tmp/run
 # сравниваю продолжительность файлов
 	dur1=$(ffprobe -v quiet -i "${o}" -show_format|grep duration|cut -f2 -d'='|cut -f1 -d'.')
 	dur2=$(ffprobe -v quiet -i "${name}" -show_format|grep duration|cut -f2 -d'='|cut -f1 -d'.')
@@ -118,4 +123,4 @@ EOF
 		fi
 	fi
 done
-rm list
+rm /tmp/list
