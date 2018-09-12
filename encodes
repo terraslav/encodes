@@ -1,5 +1,5 @@
 #!/bin/bash
-# скрипт перекодирования видеофайлов кодеками hevc(x265) и Vorbis
+# скрипт перекодирования видеофайлов кодеками hevc(x265) и Opus
 
 # путь к папке с корзиной, если данные находяться на основном разделе то путь будет:
 # /home/%user%/.local/share/Trash
@@ -7,6 +7,7 @@
 recycle="/media/media/.Trash-1000"
 ext="--no-wrap --info --timeout=5"
 err="--title=\"Ошибка\""
+tmp="/tmp/tmp.$$"
 # для работы скрипта я использую ffmpeg, собранный в такой конфигурации:
 if	[ "$(which ffprobe)_" = "_" ] ||
 	[ "$(ffprobe -v quiet -version|grep "libx265"|grep "libvorbis")_" = "_" ];then
@@ -29,31 +30,37 @@ if	[ "$(which ffprobe)_" = "_" ] ||
 fi
 
 # запрашиваю путь к папке с медифайлами
-work_path=$(zenity --title="Выбор папки" --file-selection --directory --filename="`pwd`")
+if [ -f ~/.lastworkfile ]; then
+	work_path="$(cat ~/.lastworkfile)"
+else
+	work_path="$(pwd)"
+fi
+work_path=$(zenity --title="Выбор папки" --file-selection --directory --filename="${work_path}")
 if [ "${work_path}_" = "_" ]; then
 	zenity --text="Не выбрана целевая папка!" ${err} ${ext} &
 	exit 0
 fi
+echo "${work_path}" > ~/.lastworkfile
 
 # Выбор битрейта сжатия
-brate=$(zenity --scale --title="Выбор битрейта сжатия" --text="0 - Наихудшее качество/минимальный битрейт\r11 - Минимальные потери качества/максимальный битрейт" --min-value=0 --max-value=11 --step=1 --value=0)
-brate=$(( 28 - brate ))
+brate=$(zenity --scale --title="Выбор битрейта для кодека hevc" --text="Выбор параметра crf для ffmpeg:\r\r28 Наихудшее качество (минимальный битрейт)\r17 Минимальные потери качества (максимальный битрейт)" --min-value=17 --max-value=28 --step=1 --value=25)
+if [ "${brate}_" = "_" ]; then echo "Отмена"; exit 0; fi
 echo $brate
 
 # поиск всех видеофайлов в папке с глубиной вложенности до 4 подпапок
-find ${work_path} -maxdepth 5 -regextype posix-egrep -regex '.*(AVI|avi|MKV|mkv|MP4|mp4|3GP|3gp)$' > vlist
+find ${work_path} -maxdepth 5 -regextype posix-egrep -regex '.*(AVI|avi|MKV|mkv|MP4|mp4|3GP|3gp|webm|WEBM)$' > /tmp/vlist
 
 # цикл отсева файлов уже конвертированых кодеком hevc
 if [ -f /tmp/list ]; then rm /tmp/list; fi
 while read i; do
 # получаю все кодеки, используемые в демуксере
-	ffprobe -v quiet -show_streams -i "${i}"|sed -n 's/.*codec_name=\([a-z,A-Z,0-9,\.]*\).*/\1/p' > codecs
+	ffprobe -i "${i}" -show_streams 2>&1|sed -n 's/.*codec_name=\([a-z,A-Z,0-9,\.]*\).*/\1/p' > /tmp/codecs
 	while read codec; do
 		if [ "${codec}_" = "hevc_" ]; then
 			break
 		fi
-	done < codecs
-	rm codecs
+	done < /tmp/codecs
+	rm /tmp/codecs
 # и фильтрую hevc
 	if [ "${codec}_" = "hevc_" ]; then
 		echo "Skipping: ${i}"
@@ -64,14 +71,15 @@ while read i; do
 	fi
 # если в файле нет упоминания о hevc добавляю файл в рабочий листинг
 	echo "${i}" >> /tmp/list
-done < vlist
-rm vlist
+done < /tmp/vlist
+rm /tmp/vlist
 
 # цикл конвертирования
 exec 10</tmp/list
 while read i <&10; do
 # определение количесва потоков в демуксере
-	a=$(ffprobe -i "${i}" -show_streams 2>&1|grep 'Stream #'|sed -n 's/^.*\(0:[0-9]\+\).*/\1/p')
+	ffprobe -i "${i}" -show_streams 2>&1|grep 'Stream #' > ${tmp}
+	a=$(ffprobe -i "${i}" -show_streams 2>&1|grep 'Stream #'|sed -n 's/^.*#\(0:[0-9]\+\).*/\1/p')
 	count=$(echo ${a}|wc -w)
 	c=0
 	line=
@@ -82,19 +90,29 @@ while read i <&10; do
 		(( c++ ))
 	done
 # уменшение размера, если требуется
-	width=$(ffprobe -v quiet -show_streams -i "${i}"|sed -n 's/^width=\([0-9]\{3,4\}\).*/\1/p')
+	res=$(cat ${tmp}|grep "Video\|video"|sed 's/.*\( [0-9]\{3,4\}x[0-9]\{2,3\}\).*/\1/;s/^ //')
+	width=$(echo ${res}|cut -f1 -d'x')
+	height=$(echo ${res}|cut -f2 -d'x')
 	if [ ${width} -gt 1280 ];then
-		line="${line} -vf scale=1280:-1"
+# округляю высоту до четного числа
+		new_height=$(echo "$height/$width*1280"|bc -l|cut -f1 -d'.')
+		new_height=$(echo $(( $new_height % 2 + $new_height)))
+		line="${line} -vf scale=1280:${new_height}"
 	fi
 # получаю путь из полного имени
 	lpth=${i%/*}
-# создаю новое имя файла, заменив пробелы и точки на символы подчеркивания
-	name=$(echo ${i##*/}|sed 's/ - /-/g;s/^.\///;s/ /_/g;s/\./_/g')
+# создаю новое имя файла, заменив пробелы на символы подчеркивания, удалив ютюбовский номер и маркер
+	name=$(echo ${i##*/}|sed 's/ - /-/g;s/^.\///;s/ /_/g;s/~\./\./g;s/-[A-Z,a-z,0-9,-]\{11\}\./\./;s/1080/720/;s/[X,x][V,v][I,i][D,d]/hevc/;s/[X,x]264/hevc/')
 	name="${lpth}/${name:0:-4}.mkv"
 	name=$(echo ${name}|sed 's/-[A-Z,a-z,0-9,-]\{11\}\./\./')
-# переименовываю исходный файл, добавив в конец имени плюсик, что-бы избежать совпадения имён
-	o="${i:0:-4}+.${i: -3:3}"
-	mv "${i}" "${o}"
+	if [ "${i: -5:1}" = "~" ]; then
+		o="${i}"
+# удаляю при необходимости прерванный предыдущим запуском файл
+		if [ -f "${name}" ]; then rm "${name}"; fi
+	else
+		o="${i:0:-4}~.${i: -3:3}"
+		mv "${i}" "${o}"
+	fi
 # создаю и запускаю маленький скрипт с заданными параметрами конвертации
 	cat > "/tmp/run" << EOF
 #!/bin/bash
@@ -123,4 +141,5 @@ EOF
 		fi
 	fi
 done
+if [ -f ${tmp} ]; then rm ${tmp}; fi
 rm /tmp/list
